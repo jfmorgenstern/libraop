@@ -564,6 +564,8 @@ static void *rtp_thread_func(void *arg) {
 	int count = 0;
 	bool ntp_sent;
 	raopst_t *ctx = (raopst_t*) arg;
+	uint32_t last_packet_time = gettime_ms();
+	uint32_t timeout_warnings = 0;
 
 	for (i = 0; i < 3; i++) {
 		if (ctx->rtp_sockets[i].sock > sock) sock = ctx->rtp_sockets[i].sock;
@@ -582,7 +584,23 @@ static void *rtp_thread_func(void *arg) {
 		FD_ZERO(&fds);
 		for (i = 0; i < 3; i++)	{ FD_SET(ctx->rtp_sockets[i].sock, &fds); }
 
-		if (select(sock + 1, &fds, NULL, NULL, &timeout) <= 0) continue;
+		if (select(sock + 1, &fds, NULL, NULL, &timeout) <= 0) {
+			// check if we haven't received any packets for too long during playback
+			uint32_t now = gettime_ms();
+			if (ctx->state == RTP_PLAY && now - last_packet_time > 30000) {
+				if (++timeout_warnings > 3) {
+					LOG_ERROR("[%p]: RTP timeout - no packets for %u ms, stream likely dead", ctx, now - last_packet_time);
+					// could notify owner via callback here
+					timeout_warnings = 0;
+				} else {
+					LOG_WARN("[%p]: RTP timeout - no packets for %u ms (warning: %u)", ctx, now - last_packet_time, timeout_warnings);
+				}
+			}
+			continue;
+		}
+
+		last_packet_time = gettime_ms();
+		timeout_warnings = 0;
 
 		for (i = 0; i < 3; i++)
 			if (FD_ISSET(ctx->rtp_sockets[i].sock, &fds)) idx = i;
@@ -852,15 +870,17 @@ static short *_buffer_get_frame(raopst_t *ctx, size_t *bytes) {
 	abuf_t* curframe = ctx->audio_buffer + BUFIDX(ctx->ab_read);
 
 	// try to request resend missing packet in order, explore up to 64 frames
+	// be more aggressive with resends when buffer is low
+	int resend_timeout = (buf_fill < 10) ? RESEND_TO / 2 : RESEND_TO;
 	for (int step = max(buf_fill / 64, 1), i = 0, first = 0; seq_order(ctx->ab_read + i, ctx->ab_write); i += step) {
 		abuf_t* frame = ctx->audio_buffer + BUFIDX(ctx->ab_read + i);
 
 		// stop when we reach a ready frame or a recent pending resend
-		if (first && (frame->ready || now - frame->last_resend <= RESEND_TO)) {
+		if (first && (frame->ready || now - frame->last_resend <= resend_timeout)) {
 			if (!rtp_request_resend(ctx, first, ctx->ab_read + i - 1)) break;
 			first = 0;
 			i += step - 1;
-		} else if (!frame->ready && now - frame->last_resend > RESEND_TO) {
+		} else if (!frame->ready && now - frame->last_resend > resend_timeout) {
 			if (!first) first = ctx->ab_read + i;
 			frame->last_resend = now;
 		}
@@ -875,7 +895,11 @@ static short *_buffer_get_frame(raopst_t *ctx, size_t *bytes) {
 
 	// wait if frame is not ready and we have time or if we have no frame and are not allowed to fill
 	if (!curframe->ready && (now < playtime || (!buf_fill && !ctx->http_fill))) {
-		LOG_SDEBUG("[%p]: waiting (fill:%hd, W:%hu R:%hu) now:%u, playtime:%u, wait:%d", ctx, buf_fill, ctx->ab_write, ctx->ab_read, now, playtime, playtime - now);
+		if (buf_fill < 5 && ctx->state == RTP_PLAY) {
+			LOG_WARN("[%p]: critically low buffer (fill:%hd, W:%hu R:%hu) waiting:%d ms", ctx, buf_fill, ctx->ab_write, ctx->ab_read, playtime - now);
+		} else {
+			LOG_SDEBUG("[%p]: waiting (fill:%hd, W:%hu R:%hu) now:%u, playtime:%u, wait:%d", ctx, buf_fill, ctx->ab_write, ctx->ab_read, now, playtime, playtime - now);
+		}
 		return NULL;
 	}
 
@@ -936,6 +960,8 @@ static void *http_thread_func(void *arg) {
 	raopst_t *ctx = (raopst_t*) arg;
 	int sock = -1;
 	struct timeval timeout = { 0, 0 };
+	uint32_t last_frame_time = gettime_ms();
+	uint32_t stall_count = 0;
 
 	while (ctx->running) {
 		fd_set rfds;
@@ -993,6 +1019,8 @@ static void *http_thread_func(void *arg) {
 
 		// wait for session to be ready before sending (no need for mutex)
 		if (ctx->http_ready && (pcm = _buffer_get_frame(ctx, &bytes)) != NULL) {
+			last_frame_time = gettime_ms();
+			stall_count = 0;
 			size_t frames = bytes / 4;
 			uint8_t* data = encoder_encode(ctx->encoder, pcm, frames, &bytes);
 
@@ -1073,6 +1101,23 @@ static void *http_thread_func(void *arg) {
 			// nothing to send, so probably can wait 2 frame unless paused
 			timeout.tv_usec = (2*ctx->frame_size*1000000)/44100;
 			pthread_mutex_unlock(&ctx->ab_mutex);
+
+			// detect if stream has stalled (no frames for 10+ seconds)
+			uint32_t now = gettime_ms();
+			if (ctx->http_ready && ctx->state == RTP_PLAY && now - last_frame_time > 10000) {
+				if (++stall_count > 5) {
+					LOG_ERROR("[%p]: Stream stalled - no frames for %u ms, closing connection", ctx, now - last_frame_time);
+					if (sock != -1) {
+						closesocket(sock);
+						sock = -1;
+						ctx->http_ready = false;
+					}
+					stall_count = 0;
+					last_frame_time = now;
+				} else {
+					LOG_WARN("[%p]: Stream possibly stalled - no frames for %u ms (count: %u)", ctx, now - last_frame_time, stall_count);
+				}
+			}
 		}
 	}
 
