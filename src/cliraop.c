@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "platform.h"
 
 #if WIN
@@ -85,6 +86,7 @@ static int print_usage(char *argv[])
 			   "\t[-t <et>] (et field in mDNS - 4 for airport-express and used to detect MFi)\n"
 			   "\t[-m <[0][,1][,2]>] (md in mDNS: metadata capabilties 0=text, 1=artwork, 2=progress)\n"
 			   "\t[-d <debug level>] (0 = silent)\n"
+			   "\t[--control-pipe <path>] named pipe for runtime control commands (vNN\\n=set volume, q\\n=quit)\n"
 			   "\t[-i] (interactive commands: 'p'=pause, 'r'=(re)start, 's'=stop, 'q'=exit, ' '=block)\n",
 			   name);
 	return -1;
@@ -178,6 +180,11 @@ int main(int argc, char *argv[]) {
 	char *secret = NULL, *md = NULL, *et = NULL;
 	bool auth = false;
 	struct in_addr host = { INADDR_ANY };
+	char *control_pipe = NULL;
+	int control_pipe_fd = -1;
+	int current_volume;
+	char cmd_buffer[256] = {0};
+	int cmd_len = 0;
 
 	for(i = 1; i < argc; i++){
 		if(!strcmp(argv[i],"-ntp")){
@@ -233,6 +240,8 @@ int main(int argc, char *argv[]) {
 		else if (!strcmp(argv[i], "-P")) {
 			passwd = argv[++i];
 			continue;
+		} else if (!strcmp(argv[i], "--control-pipe")) {
+			control_pipe = argv[++i];
 		} else if(!strcmp(argv[i],"--help") || !strcmp(argv[i],"-h")) {
 			return print_usage(argv);
 		} else if (!player.name) {
@@ -263,6 +272,20 @@ int main(int argc, char *argv[]) {
 #endif
 
 	init_platform(interactive);
+
+	// Initialize volume tracking
+	current_volume = volume;
+
+	// Open control pipe if specified
+	if (control_pipe) {
+		control_pipe_fd = open(control_pipe, O_RDONLY | O_NONBLOCK);
+		if (control_pipe_fd < 0) {
+			LOG_ERROR("Cannot open control pipe %s: %s", control_pipe, strerror(errno));
+			// Continue without control pipe
+		} else {
+			LOG_INFO("Control pipe opened: %s", control_pipe);
+		}
+	}
 
 	// if required, pair with appleTV
 	if (pairing) AppleTVpairing(NULL, NULL, &secret);
@@ -337,6 +360,49 @@ int main(int argc, char *argv[]) {
 			frames += n / 4;
 		}
 
+		// Check for commands from control pipe
+		if (control_pipe_fd >= 0) {
+			char c;
+			ssize_t bytes_read = read(control_pipe_fd, &c, 1);
+
+			if (bytes_read > 0) {
+				if (c == '\n') {
+					// Process complete command
+					cmd_buffer[cmd_len] = '\0';
+
+					// Volume command: vNN
+					if (cmd_buffer[0] == 'v' && cmd_len > 1) {
+						int new_volume = atoi(&cmd_buffer[1]);
+
+						if (new_volume >= 0 && new_volume <= 100) {
+							if (raopcl_set_volume(raopcl, raopcl_float_volume(new_volume))) {
+								current_volume = new_volume;
+								LOG_INFO("Volume set to %d via control pipe", new_volume);
+							} else {
+								LOG_ERROR("Failed to set volume to %d", new_volume);
+							}
+						} else {
+							LOG_ERROR("Invalid volume %d (must be 0-100)", new_volume);
+						}
+					}
+					// Quit command
+					else if (cmd_buffer[0] == 'q') {
+						LOG_INFO("Quit command received via control pipe");
+						goto cleanup;
+					}
+
+					cmd_len = 0;  // Reset buffer
+				} else if (cmd_len < 255) {
+					// Buffer the character
+					cmd_buffer[cmd_len++] = c;
+				}
+			} else if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+				LOG_ERROR("Error reading from control pipe: %s", strerror(errno));
+				close(control_pipe_fd);
+				control_pipe_fd = -1;
+			}
+		}
+
 		if (interactive && kbhit()) {
 			char c = _getch();
 
@@ -379,10 +445,14 @@ int main(int argc, char *argv[]) {
 
 	} while (n || raopcl_is_playing(raopcl));
 
+cleanup:
 	free(buf);
 	raopcl_disconnect(raopcl);
 
 exit:
+	if (control_pipe_fd >= 0) {
+		close(control_pipe_fd);
+	}
 	raopcl_destroy(raopcl);
 	close_platform(interactive);
 	return 0;

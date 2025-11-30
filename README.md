@@ -19,6 +19,15 @@ usage: ./build/raop_play <options> <server_ip> <filename ('-' for stdin)>
 	[-r] (do interactive pairing with AppleTV)
 	[-d <debug level>] (0 = silent)
 	[-i] (interactive commands: 'p'=pause, 'r'=(re)start, 's'=stop, 'q'=exit, ' '=block)
+	[--control-pipe <path>] (control volume at runtime via named pipe)
+```
+
+For runtime volume control, use `--control-pipe` with a named pipe. Example:
+```bash
+mkfifo /tmp/raop_control
+./build/raop_play --control-pipe /tmp/raop_control 192.168.1.100 music.wav &
+echo "v75" > /tmp/raop_control  # Set volume to 75%
+echo "q" > /tmp/raop_control    # Quit
 ```
 
 It's possible to send synchronous audio to multiple players by using the NTP options (optionally combined with the wait option).
@@ -29,7 +38,7 @@ raop_play
 ## Building using CMake
 
 ```sh
-# install build libreries 
+# install build libreries
 apt-get install build-essential cmake  libssl-dev
 
 # Fetch all dependencies
