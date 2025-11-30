@@ -565,6 +565,7 @@ static void *rtp_thread_func(void *arg) {
 	bool ntp_sent;
 	raopst_t *ctx = (raopst_t*) arg;
 	uint32_t last_packet_time = gettime_ms();
+	uint32_t last_sync_packet_time = 0;
 	uint32_t timeout_warnings = 0;
 
 	for (i = 0; i < 3; i++) {
@@ -595,6 +596,10 @@ static void *rtp_thread_func(void *arg) {
 				} else {
 					LOG_WARN("[%p]: RTP timeout - no packets for %u ms (warning: %u)", ctx, now - last_packet_time, timeout_warnings);
 				}
+			}
+			// also check if receiver stopped sending sync packets (sign of device going silent)
+			if (ctx->state == RTP_PLAY && last_sync_packet_time > 0 && now - last_sync_packet_time > 60000) {
+				LOG_ERROR("[%p]: No sync packets from receiver for %u ms - device may have stopped playing", ctx, now - last_sync_packet_time);
 			}
 			continue;
 		}
@@ -655,6 +660,8 @@ static void *rtp_thread_func(void *arg) {
 				uint32_t rtp_now_latency = ntohl(*(uint32_t*)(pktp+4));
 				uint32_t rtp_now = ntohl(*(uint32_t*)(pktp+16));
 
+				last_sync_packet_time = gettime_ms();
+
 				pthread_mutex_lock(&ctx->ab_mutex);
 
 				// memorize that remote timing for when NTP adjustment arrives
@@ -690,6 +697,8 @@ static void *rtp_thread_func(void *arg) {
 				if (!count--) {
 					rtp_request_timing(ctx);
 					count = 3;
+					// log sync packet reception periodically to detect if receiver stops
+					LOG_DEBUG("[%p]: sync packet received (last: %u ms ago)", ctx, gettime_ms() - last_sync_packet_time);
 				}
 				break;
 			}
