@@ -541,6 +541,7 @@ bool raopcl_send_chunk(struct raopcl_s *p, uint8_t *sample, int frames, uint64_t
 			break;
 		}
 		default:
+			pthread_mutex_unlock(&p->mutex);
 			LOG_ERROR("[%p]: don't know what we're doing here", p);
 			return false;
 	}
@@ -663,7 +664,7 @@ struct raopcl_s *raopcl_create(struct in_addr host, uint16_t port_base, uint16_t
 							   char *DACP_id, char *active_remote,
 							   raop_codec_t codec, int chunk_len, int latency_frames,
 							   raop_crypto_t crypto, bool auth, char *secret, char* passwd,
-							   char *et, char *md,
+							   char *et, char *md, char const *am, 
 							   int sample_rate, int sample_size, int channels, float volume)
 {
 	raopcl_data_t *raopcld;
@@ -702,8 +703,12 @@ struct raopcl_s *raopcl_create(struct in_addr host, uint16_t port_base, uint16_t
 	if (md && strchr(md, '1')) raopcld->md_caps |= MD_ARTWORK;
 	if (md && strchr(md, '2')) raopcld->md_caps |= MD_PROGRESS;
 
+	// starting with OS27, Apple checks ua (sigh...)
+	char const *ua = "iTunes/7.6.2 (Windows; N;)";
+	if (am && (strcasestr(am, "AudioAccessory") || strcasestr(am, "AppleTV"))) ua = "AirPlay/999.0.0";
+
 	// init RTSP if needed
-	if (((raopcld->rtspcl = rtspcl_create("iTunes/7.6.2 (Windows; N;)")) == NULL)) {
+	if (((raopcld->rtspcl = rtspcl_create(ua)) == NULL)) {
 		LOG_ERROR("[%p]: Cannot create RTSP context", raopcld);
 		free(raopcld);
 		return NULL;
@@ -734,11 +739,11 @@ struct raopcl_s *raopcl_create(struct in_addr host, uint16_t port_base, uint16_t
 static void _raopcl_terminate_rtp(struct raopcl_s *p)
 {
 	// Terminate RTP threads and close sockets
+	if (p->ctrl_running) pthread_join(p->ctrl_thread, NULL);
 	p->ctrl_running = false;
-	pthread_join(p->ctrl_thread, NULL);
 
+	if (p->time_running) pthread_join(p->time_thread, NULL);
 	p->time_running = false;
-	pthread_join(p->time_thread, NULL);
 
 	if (p->rtp_ports.ctrl.fd != -1) closesocket(p->rtp_ports.ctrl.fd);
 	if (p->rtp_ports.time.fd != -1) closesocket(p->rtp_ports.time.fd);

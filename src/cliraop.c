@@ -83,8 +83,10 @@ static int print_usage(char *argv[])
 			   "\t[-s <secret>] (valid secret for AppleTV)\n"
 			   "\t[-P <password>] (device password)\n"
 			   "\t[-r] do AppleTV pairing\n"
+			   "\t[-R] ('r' does a full RTSP re-handshake (raopcl_repair) before restart)\n"
 			   "\t[-t <et>] (et field in mDNS - 4 for airport-express and used to detect MFi)\n"
 			   "\t[-m <[0][,1][,2]>] (md in mDNS: metadata capabilties 0=text, 1=artwork, 2=progress)\n"
+			   "\t[-o <model>] (am in mDNS: model HomePods, AppleTV...\n" 
 			   "\t[-d <debug level>] (0 = silent)\n"
 			   "\t[--control-pipe <path>] named pipe for runtime control commands (vNN\\n=set volume, q\\n=quit)\n"
 			   "\t[-i] (interactive commands: 'p'=pause, 'r'=(re)start, 's'=stop, 'q'=exit, ' '=block)\n",
@@ -176,8 +178,8 @@ int main(int argc, char *argv[]) {
 	enum {STOPPED, PAUSED, PLAYING } status;
 	raop_crypto_t crypto = RAOP_CLEAR;
 	uint64_t start = 0, start_at = 0, last = 0, frames = 0;
-	bool interactive = false, alac = false, pairing = false;
-	char *secret = NULL, *md = NULL, *et = NULL;
+	bool interactive = false, alac = false, pairing = false, repair_resume = false;
+	char *secret = NULL, *md = NULL, *et = NULL, *am = NULL;
 	bool auth = false;
 	struct in_addr host = { INADDR_ANY };
 	char *control_pipe = NULL;
@@ -210,14 +212,18 @@ int main(int argc, char *argv[]) {
 			secret = argv[++i];
 		} else if (!strcmp(argv[i],"-m")) {
 			md = argv[++i];
+		} else if (!strcmp(argv[i], "-o")) {
+			md = argv[++i];
 		} else if(!strcmp(argv[i],"-t")) {
-			et = argv[++i];
+			am = argv[++i];
 		} else if (!strcmp(argv[i], "-u")) {
 			auth = true;
 		} else if (!strcmp(argv[i],"-a")) {
 			alac = true;
 		} else if (!strcmp(argv[i], "-r")) {
 			pairing = true;
+		} else if (!strcmp(argv[i], "-R")) {
+			repair_resume = true;
 		} else if(!strcmp(argv[i],"-n")) {
 			sscanf(argv[++i], "%" PRIu64, &start);
 		} else if (!strcmp(argv[i],"-nf")) {
@@ -292,7 +298,7 @@ int main(int argc, char *argv[]) {
 	
 	// create the raop context
 	if ((raopcl = raopcl_create(host, 0, 0, NULL, NULL, alac ? RAOP_ALAC : RAOP_PCM, DEFAULT_FRAMES_PER_CHUNK,
-								latency, crypto, auth, secret, passwd, et, md,
+								latency, crypto, auth, secret, passwd, et, md, am,
 								44100, 16, 2,
 								raopcl_float_volume(volume))) == NULL) {
 		LOG_ERROR("Cannot init RAOP %p", raopcl);
@@ -425,8 +431,12 @@ int main(int argc, char *argv[]) {
 				uint64_t now = raopcl_get_ntp(NULL);
 				uint64_t start_at = now + MS2NTP(200) - TS2NTP(latency, raopcl_sample_rate(raopcl));
 
+				// resume with a full RTSP re-handshake instead of the bare start_at
+				if (repair_resume) raopcl_repair(raopcl, true);
+
 				status = PLAYING;
 				raopcl_start_at(raopcl, start_at);
+
 				LOG_INFO("Re-started at : %u.%u", RAOP_SECNTP(start_at));
 				}
 				break;
