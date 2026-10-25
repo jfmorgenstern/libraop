@@ -416,6 +416,7 @@ int main(int argc, char *argv[]) {
 	
 	do {
 		uint64_t playtime, now;
+		bool sent = false;
 
 		now = raopcl_get_ntp(NULL);
 
@@ -433,6 +434,7 @@ int main(int argc, char *argv[]) {
 			if (!n)	continue;
 			raopcl_send_chunk(raopcl, buf, n / 4, &playtime);
 			frames += n / 4;
+			sent = true;
 		}
 
 		// Check for commands from control pipe
@@ -550,6 +552,9 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
+		// nothing to send yet (the receiver's buffer is ahead): do not spin at 100% CPU polling
+		// the control pipe and the keyboard; a chunk is ~8 ms, so 2 ms adds no audible latency
+		if (!sent) usleep(2000);
 	} while (n || raopcl_is_playing(raopcl));
 
 cleanup:
