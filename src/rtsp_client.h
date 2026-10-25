@@ -24,6 +24,7 @@ typedef struct rtp_port_s {
 } rtp_port_t;
 
 struct rtspcl_s *rtspcl_create(char const *user_name);
+void rtspcl_set_useragent(struct rtspcl_s *p, char const *useragent);
 bool   			rtspcl_destroy(struct rtspcl_s *p);
 
 bool rtspcl_connect(struct rtspcl_s *p, struct in_addr local, struct in_addr host, unsigned short destport, char *sid);

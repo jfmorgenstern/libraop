@@ -47,6 +47,67 @@ log_level 	main_log;
 // our debug level
 log_level *loglevel =&main_log;
 
+// track metadata set through the control pipe (T/A/L/G, sent with M), last artwork file (I)
+#define META_LEN 256
+static char meta_title[META_LEN], meta_artist[META_LEN], meta_album[META_LEN], meta_genre[META_LEN];
+static char meta_artwork[META_LEN];
+
+/*----------------------------------------------------------------------------*/
+static void meta_set(char *dst, const char *src) {
+	strncpy(dst, src, META_LEN - 1);
+	dst[META_LEN - 1] = '\0';
+}
+
+/*----------------------------------------------------------------------------*/
+static bool send_metadata(struct raopcl_s *raopcl) {
+	// empty strings are valid DMAP values and clear the field on the receiver
+	bool rc = raopcl_set_daap(raopcl, 4, "minm", 's', meta_title, "asar", 's', meta_artist,
+										 "asal", 's', meta_album, "asgn", 's', meta_genre);
+	if (rc) LOG_INFO("Metadata sent: %s - %s (%s)", meta_artist, meta_title, meta_album);
+	else LOG_WARN("Metadata not sent (not connected, or device without text metadata capability; check -m)");
+	return rc;
+}
+
+/*----------------------------------------------------------------------------*/
+static bool send_artwork(struct raopcl_s *raopcl, const char *path) {
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		LOG_WARN("Artwork file %s cannot be opened: %s", path, strerror(errno));
+		return false;
+	}
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (size <= 0 || size > 2 * 1024 * 1024) {
+		LOG_WARN("Artwork file %s has an unusable size (%ld bytes)", path, size);
+		fclose(f);
+		return false;
+	}
+	char *data = malloc(size);
+	if (!data || fread(data, 1, size, f) != (size_t) size) {
+		LOG_WARN("Artwork file %s cannot be read", path);
+		free(data);
+		fclose(f);
+		return false;
+	}
+	fclose(f);
+
+	char *type = NULL;
+	if (size >= 2 && (uint8_t) data[0] == 0xFF && (uint8_t) data[1] == 0xD8) type = "image/jpeg";
+	else if (size >= 4 && !memcmp(data, "\x89PNG", 4)) type = "image/png";
+	if (!type) {
+		LOG_WARN("Artwork file %s is neither JPEG nor PNG", path);
+		free(data);
+		return false;
+	}
+
+	bool rc = raopcl_set_artwork(raopcl, type, (int) size, data);
+	if (rc) LOG_INFO("Artwork sent: %s (%ld bytes, %s)", path, size, type);
+	else LOG_WARN("Artwork not sent (not connected, or device without artwork capability; check -m)");
+	free(data);
+	return rc;
+}
+
 // different combination of debug levels per channel
 struct debug_s {
 	int main, raop, util;
@@ -86,9 +147,13 @@ static int print_usage(char *argv[])
 			   "\t[-R] ('r' does a full RTSP re-handshake (raopcl_repair) before restart)\n"
 			   "\t[-t <et>] (et field in mDNS - 4 for airport-express and used to detect MFi)\n"
 			   "\t[-m <[0][,1][,2]>] (md in mDNS: metadata capabilties 0=text, 1=artwork, 2=progress)\n"
-			   "\t[-o <model>] (am in mDNS: model HomePods, AppleTV...\n" 
+			   "\t[-o <model>] (am in mDNS: model HomePods, AppleTV... selects the User-Agent Apple accepts)\n"
+			   "\t[-U <user-agent>] override the RTSP User-Agent (default: iTunes/7.6.2, AirPlay/999.0.0 for HomePod/AppleTV)\n"
 			   "\t[-d <debug level>] (0 = silent)\n"
-			   "\t[--control-pipe <path>] named pipe for runtime control commands (vNN\\n=set volume, q\\n=quit)\n"
+			   "\t[--control-pipe <path>] named pipe for runtime control commands, one per line:\n"
+			   "\t      vNN set volume, q quit, T<title> A<artist> L<album> G<genre> set text (sent with M),\n"
+			   "\t      I<file> send JPEG/PNG artwork, P<elapsed_ms>/<duration_ms> progress, C clear metadata\n"
+			   "\t      (metadata needs the device's md capabilities passed with -m, e.g. -m 0,1,2)\n"
 			   "\t[-i] (interactive commands: 'p'=pause, 'r'=(re)start, 's'=stop, 'q'=exit, ' '=block)\n",
 			   name);
 	return -1;
@@ -179,7 +244,7 @@ int main(int argc, char *argv[]) {
 	raop_crypto_t crypto = RAOP_CLEAR;
 	uint64_t start = 0, start_at = 0, last = 0, frames = 0;
 	bool interactive = false, alac = false, pairing = false, repair_resume = false;
-	char *secret = NULL, *md = NULL, *et = NULL, *am = NULL;
+	char *secret = NULL, *md = NULL, *et = NULL, *am = NULL, *user_agent = NULL;
 	bool auth = false;
 	struct in_addr host = { INADDR_ANY };
 	char *control_pipe = NULL;
@@ -213,7 +278,9 @@ int main(int argc, char *argv[]) {
 		} else if (!strcmp(argv[i],"-m")) {
 			md = argv[++i];
 		} else if (!strcmp(argv[i], "-o")) {
-			md = argv[++i];
+			am = argv[++i];
+		} else if (!strcmp(argv[i], "-U")) {
+			user_agent = argv[++i];
 		} else if(!strcmp(argv[i],"-t")) {
 			am = argv[++i];
 		} else if (!strcmp(argv[i], "-u")) {
@@ -306,6 +373,8 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
+	if (user_agent) raopcl_set_useragent(raopcl, user_agent);
+
 	// get player's address
 	player.hostent = gethostbyname(player.name);
 	if (!player.hostent) {
@@ -396,6 +465,30 @@ int main(int argc, char *argv[]) {
 						LOG_INFO("Quit command received via control pipe");
 						goto cleanup;
 					}
+					// Metadata: T/A/L/G store text, M sends it, I sends an artwork file,
+					// P sets progress, C clears everything on the receiver
+					else if (cmd_buffer[0] == 'T') meta_set(meta_title, cmd_buffer + 1);
+					else if (cmd_buffer[0] == 'A') meta_set(meta_artist, cmd_buffer + 1);
+					else if (cmd_buffer[0] == 'L') meta_set(meta_album, cmd_buffer + 1);
+					else if (cmd_buffer[0] == 'G') meta_set(meta_genre, cmd_buffer + 1);
+					else if (cmd_buffer[0] == 'M') send_metadata(raopcl);
+					else if (cmd_buffer[0] == 'I' && cmd_len > 1) {
+						meta_set(meta_artwork, cmd_buffer + 1);
+						send_artwork(raopcl, meta_artwork);
+					}
+					else if (cmd_buffer[0] == 'P') {
+						unsigned elapsed = 0, duration = 0;
+						if (sscanf(cmd_buffer + 1, "%u/%u", &elapsed, &duration) >= 1) {
+							if (!raopcl_set_progress_ms(raopcl, elapsed, duration))
+								LOG_DEBUG("Progress not sent (not streaming or no progress capability)");
+						}
+					}
+					else if (cmd_buffer[0] == 'C') {
+						meta_title[0] = meta_artist[0] = meta_album[0] = meta_genre[0] = meta_artwork[0] = '\0';
+						send_metadata(raopcl);
+						raopcl_set_progress_ms(raopcl, 0, 0);
+					}
+					else if (cmd_len > 0) LOG_WARN("Unknown control pipe command '%c'", cmd_buffer[0]);
 
 					cmd_len = 0;  // Reset buffer
 				} else if (cmd_len < 255) {
@@ -438,6 +531,10 @@ int main(int argc, char *argv[]) {
 				raopcl_start_at(raopcl, start_at);
 
 				LOG_INFO("Re-started at : %u.%u", RAOP_SECNTP(start_at));
+
+				// the receiver forgot the metadata with the re-handshake
+				if (*meta_title || *meta_artist || *meta_album) send_metadata(raopcl);
+				if (*meta_artwork) send_artwork(raopcl, meta_artwork);
 				}
 				break;
 			case 'q':

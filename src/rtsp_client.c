@@ -73,6 +73,12 @@ struct rtspcl_s *rtspcl_create(char const *useragent) {
 }
 
 /*----------------------------------------------------------------------------*/
+void rtspcl_set_useragent(struct rtspcl_s *p, char const *useragent) {
+	// the string must outlive the client (argv or a static is fine)
+	if (p && useragent && *useragent) p->useragent = useragent;
+}
+
+/*----------------------------------------------------------------------------*/
 bool rtspcl_is_connected(struct rtspcl_s *p) {
 	if (p->fd == -1) return false;
 	return rtspcl_is_sane(p);

@@ -838,6 +838,13 @@ bool raopcl_set_daap(struct raopcl_s *p, int count, ...)
 }
 
 /*----------------------------------------------------------------------------*/
+void raopcl_set_useragent(struct raopcl_s *p, char const *useragent)
+{
+	// override the model-based choice (iTunes/7.6.2 or AirPlay/999.0.0); call before raopcl_connect
+	if (p && p->rtspcl) rtspcl_set_useragent(p->rtspcl, useragent);
+}
+
+/*----------------------------------------------------------------------------*/
 static bool raopcl_set_sdp(struct raopcl_s *p, char *sdp)
 {
 	bool rc = true;

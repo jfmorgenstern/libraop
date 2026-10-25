@@ -68,3 +68,21 @@ You need pthread for Windows to recompile the player / use the library here: htt
 It's largely inspired from https://github.com/chevil/raop2_play but limit the playback to pcm as it focuses on creating a library and optimizing AirPlay synchronization
 
 Since iOS 10.2, pairing is required with AppleTV. Here is a description of the protocol https://htmlpreview.github.io/?https://github.com/philippe44/RAOP-Player/blob/master/doc/auth_protocol.html
+
+## Control pipe (raop_play)
+
+`raop_play --control-pipe <fifo>` reads one command per line while playing:
+
+| command | effect |
+|---|---|
+| `vNN` | set volume 0-100 |
+| `q` | quit |
+| `T<title>`, `A<artist>`, `L<album>`, `G<genre>` | store text (UTF-8, up to 254 bytes each) |
+| `M` | send the stored text as DMAP metadata (`SET_PARAMETER application/x-dmap-tagged`) |
+| `I<file>` | send a JPEG or PNG file as artwork |
+| `P<elapsed_ms>/<duration_ms>` | set the progress bar (duration 0 = unknown) |
+| `C` | clear text, artwork and progress on the receiver |
+
+Metadata requires the receiver's `md` capabilities (from its mDNS TXT record) passed with `-m`, e.g. `-m 0,1,2`. The stored text and artwork are re-sent after an interactive restart (`r`).
+
+`-o <model>` passes the `am` field of the TXT record; for HomePods (`AudioAccessory…`) and Apple TVs the RTSP `User-Agent` then becomes `AirPlay/999.0.0`, which Apple requires since OS 27. `-U <user-agent>` overrides the choice.
