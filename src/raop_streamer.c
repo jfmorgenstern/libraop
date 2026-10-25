@@ -1147,11 +1147,10 @@ static void *http_thread_func(void *arg) {
 			if (ctx->http_ready && ctx->state == RTP_PLAY && now - last_frame_time > 10000) {
 				if (++stall_count > 5) {
 					LOG_ERROR("[%p]: Stream stalled - no frames for %u ms, closing connection", ctx, now - last_frame_time);
-					if (sock != -1) {
-						closesocket(sock);
-						sock = -1;
-						ctx->http_ready = false;
-					}
+					// upstream keeps the descriptor in ctx->http_socket (guarded by http_mutex);
+					// closing it makes the accept loop above wait for a new connection
+					http_close(ctx);
+					ctx->http_ready = false;
 					stall_count = 0;
 					last_frame_time = now;
 				} else {
