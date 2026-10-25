@@ -35,6 +35,7 @@
 #include "cross_util.h"
 #include "cross_log.h"
 
+#define RAOP_PLAY_BUILD "2026-10-25b"   // logged at start so deployments can be verified
 #define RAOP_SEC(ntp) ((uint32_t) ((ntp) >> 32))
 #define RAOP_FRAC(ntp) ((uint32_t) (ntp))
 #define RAOP_SECNTP(ntp) RAOP_SEC(ntp),RAOP_FRAC(ntp)
@@ -345,6 +346,7 @@ int main(int argc, char *argv[]) {
 #endif
 
 	init_platform(interactive);
+	LOG_INFO("raop_play build %s (hifi-berry fork)", RAOP_PLAY_BUILD);
 
 	// Initialize volume tracking
 	current_volume = volume;
